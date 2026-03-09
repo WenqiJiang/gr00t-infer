@@ -85,8 +85,8 @@ The focus is on enabling customization of robot behaviors through finetuning.
 GR00T relies on submodules for certain dependencies. Include them when cloning:
 
 ```sh
-git clone --recurse-submodules https://github.com/NVIDIA/Isaac-GR00T
-cd Isaac-GR00T
+git clone --recurse-submodules https://github.com/WenqiJiang/gr00t-infer
+cd gr00t-infer
 ```
 
 If you've already cloned without submodules, initialize them separately:
@@ -94,6 +94,8 @@ If you've already cloned without submodules, initialize them separately:
 ```sh
 git submodule update --init --recursive
 ```
+
+> This repo is forked from [NVIDIA/Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T).
 
 ### Set Up the Environment
 
@@ -106,6 +108,7 @@ After installing uv, create the environment and install GR00T:
 ```sh
 uv sync --python 3.10
 uv pip install -e .
+uv sync --extra gpu
 ```
 
 > Note: CUDA 12.4 is recommended and officially tested. However, CUDA 11.8 has also been verified to work.

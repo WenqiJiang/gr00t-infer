@@ -344,6 +344,16 @@ def run_rollout_gymnasium_policy(
                 # Accumulate results
                 episode_lengths.append(current_lengths[env_idx])
                 episode_successes.append(current_successes[env_idx])
+                n_act = wrapper_configs.multistep.n_action_steps
+                print(
+                    f"[DEBUG] Episode {len(episode_successes)} done: "
+                    f"env={env_idx}, "
+                    f"steps={current_lengths[env_idx]} "
+                    f"(~{current_lengths[env_idx] * n_act} raw), "
+                    f"success={current_successes[env_idx]}, "
+                    f"terminated={terminations[env_idx]}, "
+                    f"truncated={truncations[env_idx]}"
+                )
                 # Reset trackers for this environment.
                 current_successes[env_idx] = False
                 # only update completed_episodes if valid
@@ -363,6 +373,16 @@ def run_rollout_gymnasium_policy(
     env.reset()
     env.close()
     print(f"Collecting {n_episodes} episodes took {time.time() - start_time} seconds")
+
+    # Report average episode length
+    n_act = wrapper_configs.multistep.n_action_steps
+    raw_lengths = [l * n_act for l in episode_lengths]
+    print(f"Avg steps (all episodes): {np.mean(raw_lengths):.1f} raw")
+    success_raw = [l for l, s in zip(raw_lengths, episode_successes) if s]
+    if success_raw:
+        print(f"Avg steps (succeeded):    {np.mean(success_raw):.1f} raw")
+    else:
+        print("Avg steps (succeeded):    N/A (no successes)")
 
     assert len(episode_successes) >= n_episodes, (
         f"Expected at least {n_episodes} episodes, got {len(episode_successes)}"
@@ -395,8 +415,16 @@ def create_gr00t_sim_policy(
     if policy_client_host and policy_client_port:
         from gr00t.policy.server_client import PolicyClient
 
+        print(f"Connecting to policy server at {policy_client_host}:{policy_client_port}...")
         policy = PolicyClient(host=policy_client_host, port=policy_client_port)
+        if policy.ping():
+            print(f"Successfully connected to server at"
+                  f" {policy_client_host}:{policy_client_port}")
+        else:
+            print(f"WARNING: Server at {policy_client_host}:{policy_client_port}"
+                  " is not responding. Will retry on first request.")
     else:
+        print(f"Loading local model from {model_path}...")
         policy = Gr00tSimPolicyWrapper(
             Gr00tPolicy(
                 embodiment_tag=embodiment_tag,
@@ -404,6 +432,7 @@ def create_gr00t_sim_policy(
                 device=0,
             )
         )
+        print("Local model loaded successfully")
     return policy
 
 
@@ -464,8 +493,8 @@ if __name__ == "__main__":
         type=str,
         default="",
     )
-    parser.add_argument("--policy_client_host", type=str, default="")
-    parser.add_argument("--policy_client_port", type=int, default=None)
+    parser.add_argument("--policy_client_host", type=str, default="127.0.0.1")
+    parser.add_argument("--policy_client_port", type=int, default=5555)
     parser.add_argument(
         "--env_name",
         type=str,

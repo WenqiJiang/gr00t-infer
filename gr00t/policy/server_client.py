@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import io
+import time
 from typing import Any, Callable
 
 import msgpack
@@ -110,6 +111,9 @@ class PolicyServer:
     def run(self):
         addr = self.socket.getsockopt_string(zmq.LAST_ENDPOINT)
         print(f"Server is ready and listening on {addr}")
+        print(f"  Registered endpoints: {list(self._endpoints.keys())}")
+        print("Waiting for client requests...")
+        request_count = 0
         while self.running:
             try:
                 message = self.socket.recv()
@@ -117,25 +121,41 @@ class PolicyServer:
 
                 # Validate token before processing request
                 if not self._validate_token(request):
+                    print("WARNING: Rejected request with invalid API token")
                     self.socket.send(
                         MsgSerializer.to_bytes({"error": "Unauthorized: Invalid API token"})
                     )
                     continue
 
                 endpoint = request.get("endpoint", "get_action")
+                request_count += 1
 
                 if endpoint not in self._endpoints:
                     raise ValueError(f"Unknown endpoint: {endpoint}")
 
+                if endpoint == "ping":
+                    print(f"[Request #{request_count}] Client ping received")
+                elif endpoint == "reset":
+                    print(f"[Request #{request_count}] Client requested policy reset")
+                elif endpoint == "kill":
+                    print(f"[Request #{request_count}] Client requested server shutdown")
+
+                t0 = time.time()
                 handler = self._endpoints[endpoint]
                 result = (
                     handler.handler(**request.get("data", {}))
                     if handler.requires_input
                     else handler.handler()
                 )
+                elapsed_ms = (time.time() - t0) * 1000
                 self.socket.send(MsgSerializer.to_bytes(result))
+
+                print(
+                    f"[Request #{request_count}] {endpoint} responded"
+                    f" in {elapsed_ms:.1f}ms"
+                )
             except Exception as e:
-                print(f"Error in server: {e}")
+                print(f"Error processing request: {e}")
                 import traceback
 
                 print(traceback.format_exc())
@@ -167,13 +187,20 @@ class PolicyClient(BasePolicy):
     def _init_socket(self):
         """Initialize or reinitialize the socket with current settings"""
         self.socket = self.context.socket(zmq.REQ)
-        self.socket.connect(f"tcp://{self.host}:{self.port}")
+        addr = f"tcp://{self.host}:{self.port}"
+        self.socket.connect(addr)
+        print(f"Client socket connecting to {addr}...")
 
     def ping(self) -> bool:
         try:
             self.call_endpoint("ping", requires_input=False)
+            print(f"Server at {self.host}:{self.port} is reachable")
             return True
         except zmq.error.ZMQError:
+            print(
+                f"WARNING: Server at {self.host}:{self.port} is not reachable,"
+                " reconnecting..."
+            )
             self._init_socket()  # Recreate socket for next attempt
             return False
 
@@ -181,6 +208,7 @@ class PolicyClient(BasePolicy):
         """
         Kill the server.
         """
+        print("Sending kill request to server...")
         self.call_endpoint("kill", requires_input=False)
 
     def call_endpoint(
