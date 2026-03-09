@@ -1,3 +1,8 @@
+# NOTE on reproducibility: even with fixed seeds (--seed), results may vary across
+# runs due to GPU non-determinism (CUDA, cuDNN), async vectorized env scheduling,
+# and floating-point non-associativity in MuJoCo physics. The best way to report
+# reliable accuracy is to run a large number of episodes (50+) and report mean ± stderr.
+
 import argparse
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -186,7 +191,11 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
 
 
 def create_eval_env(
-    env_name: str, env_idx: int, total_n_envs: int, wrapper_configs: WrapperConfigs
+    env_name: str,
+    env_idx: int,
+    total_n_envs: int,
+    wrapper_configs: WrapperConfigs,
+    seed: int | None = None,
 ) -> gym.Env:
     """Create a single evaluation environment with wrappers.
 
@@ -194,9 +203,16 @@ def create_eval_env(
         env_name: Name of the gymnasium environment to use
         idx: Environment index (used to determine video recording)
         wrapper_configs: Configuration for environment wrappers
+        seed: Random seed. Each env gets (seed + env_idx) for reproducibility.
     Returns:
         Wrapped gymnasium environment
     """
+    import random
+
+    if seed is not None:
+        env_seed = seed + env_idx
+        random.seed(env_seed)
+        np.random.seed(env_seed)
 
     env = get_gym_env(env_name, env_idx, total_n_envs)
     if wrapper_configs.video.video_dir is not None:
@@ -239,6 +255,7 @@ def run_rollout_gymnasium_policy(
     wrapper_configs: WrapperConfigs,
     n_episodes: int = 10,
     n_envs: int = 1,
+    seed: int | None = None,
 ) -> Any:
     """Run policy rollouts in parallel environments.
 
@@ -253,7 +270,7 @@ def run_rollout_gymnasium_policy(
         Collection results from running the episodes
     """
     start_time = time.time()
-    n_episodes = max(n_episodes, n_envs)
+    n_envs = min(n_envs, n_episodes)
     print(f"Running collecting {n_episodes} episodes for {env_name} with {n_envs} vec envs")
 
     env_fns = [
@@ -263,6 +280,7 @@ def run_rollout_gymnasium_policy(
             env_name=env_name,
             total_n_envs=n_envs,
             wrapper_configs=wrapper_configs,
+            seed=seed,
         )
         for idx in range(n_envs)
     ]
@@ -286,7 +304,7 @@ def run_rollout_gymnasium_policy(
     episode_infos = defaultdict(list)
 
     # Initial reset
-    observations, _ = env.reset()
+    observations, _ = env.reset(seed=seed)
     policy.reset()
     i = 0
 
@@ -445,15 +463,16 @@ def run_gr00t_sim_policy(
     policy_client_port: int | None = None,
     n_envs: int = 8,
     n_action_steps: int = 8,
+    seed: int | None = None,
 ):
     embodiment_tag = get_embodiment_tag_from_env_name(env_name)
 
     if model_path:
         video_dir = (
-            f"/tmp/sim_eval_videos_{model_path.split('/')[-3]}_ac{n_action_steps}_{uuid.uuid4()}"
+            f"data/sim_eval_videos/{model_path.split('/')[-1]}_ac{n_action_steps}_{uuid.uuid4()}"
         )
     else:
-        video_dir = f"/tmp/sim_eval_videos_{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
+        video_dir = f"data/sim_eval_videos/{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
     if env_name.startswith("sim_behavior_r1_pro"):
         # BEHAVIOR sim will crash if decord is imported in video_utils.py
         video_dir = None
@@ -479,6 +498,7 @@ def run_gr00t_sim_policy(
         wrapper_configs=wrapper_configs,
         n_episodes=n_episodes,
         n_envs=n_envs,
+        seed=seed,
     )
     print("Video saved to: ", wrapper_configs.video.video_dir)
     return results
@@ -502,6 +522,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--n_action_steps", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
     args = parser.parse_args()
 
@@ -524,6 +545,7 @@ if __name__ == "__main__":
         policy_client_port=args.policy_client_port,
         n_envs=args.n_envs,
         n_action_steps=args.n_action_steps,
+        seed=args.seed,
     )
     print("results: ", results)
     print("success rate: ", np.mean(results[1]))

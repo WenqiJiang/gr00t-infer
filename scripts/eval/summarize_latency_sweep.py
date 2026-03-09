@@ -170,10 +170,36 @@ def main():
 
     # Metrics to display: (title, key, format)
     metrics = [
-        ("success rate", "success_rate", ">9.1%"),
+        ("success rate (extended budget)", "success_rate_extended_budget", ">9.1%"),
+        ("success rate (original budget)", "success_rate_original_budget", ">9.1%"),
         ("avg steps (all episodes)", "avg_steps_all", ">9.1f"),
         ("avg steps (succeeded)", "avg_steps_succeeded", ">9.1f"),
     ]
+
+    # Backwards compat: old results may use "success_rate" instead of the new keys,
+    # and avg_steps may be in macro steps (not raw) if total_action_steps_per_macro
+    # is missing.
+    for r in all_results:
+        if "success_rate_extended_budget" not in r and "success_rate" in r:
+            r["success_rate_extended_budget"] = r["success_rate"]
+            r["success_rate_original_budget"] = r.get(
+                "success_rate_original_budget", r["success_rate"]
+            )
+        # Old results stored macro-step counts; convert to raw if needed.
+        scale = r.get("total_action_steps_per_macro")
+        if scale and scale > 1:
+            # avg_steps should already be raw in new results; skip if already scaled.
+            pass
+        elif "episode_lengths" in r and "episode_lengths_raw" not in r:
+            # Old format: episode_lengths are macro steps, avg_steps are macro steps.
+            lat = r.get("latency", 0)
+            stale = r.get("staleness", 0)
+            nact = r.get("n_action_steps", 8)
+            total = (lat - stale) + nact
+            if total > nact and r.get("avg_steps_all") is not None:
+                r["avg_steps_all"] = r["avg_steps_all"] * total
+            if total > nact and r.get("avg_steps_succeeded") is not None:
+                r["avg_steps_succeeded"] = r["avg_steps_succeeded"] * total
 
     for title, key, fmt in metrics:
         _print_table(

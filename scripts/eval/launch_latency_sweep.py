@@ -15,6 +15,11 @@ Usage:
 
 After completion, view results:
     uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/
+
+NOTE on reproducibility: even with fixed seeds (--seed), results may vary across
+runs due to GPU non-determinism (CUDA, cuDNN), async vectorized env scheduling,
+and floating-point non-associativity in MuJoCo physics. The best way to report
+reliable accuracy is to run a large number of episodes (50+) and report mean ± stderr.
 """
 
 import dataclasses
@@ -66,7 +71,7 @@ class Args:
     num_trials: int = 50
     """Number of episodes per experiment."""
 
-    n_envs: int = 8
+    n_envs: int = 10
     """Number of parallel simulation environments per experiment."""
 
     max_episode_steps: int = 720
@@ -83,6 +88,16 @@ class Args:
 
     server_wait: int = 300
     """Seconds to wait for each server to become ready."""
+
+    seed: int = 42
+    """Random seed for reproducibility."""
+
+    extend_episode_budget: bool = True
+    """Extend max episode steps to compensate for hold actions during latency."""
+
+    client_python: str = ""
+    """Python interpreter for client processes (e.g., a sim-specific venv).
+    If empty, auto-detected from env_prefix (robocasa uses its own venv)."""
 
 
 @dataclasses.dataclass
@@ -190,6 +205,21 @@ def main(args: Args) -> None:
     num_experiments = len(experiments)
     num_rounds = math.ceil(num_experiments / num_gpus) if num_experiments > 0 else 0
 
+    # Server runs via "uv run python" (needs main project deps).
+    # Client may need a different venv (e.g., robocasa).
+    server_cmd_prefix = ["uv", "run", "python"]
+
+    # Per-benchmark default client Python interpreters.
+    _DEFAULT_CLIENT_PYTHON = {
+        "robocasa_panda_omron": "gr00t/eval/sim/robocasa/robocasa_uv/.venv/bin/python",
+    }
+    if args.client_python:
+        client_cmd_prefix = args.client_python.split()
+    elif args.env_prefix in _DEFAULT_CLIENT_PYTHON:
+        client_cmd_prefix = [_DEFAULT_CLIENT_PYTHON[args.env_prefix]]
+    else:
+        client_cmd_prefix = ["uv", "run", "python"]
+
     log.info("=== Latency Sweep Configuration ===")
     log.info(f"  Tasks:            {args.tasks}")
     log.info(f"  Latencies:        {args.latencies}")
@@ -202,6 +232,8 @@ def main(args: Args) -> None:
     log.info(f"  Embodiment:       {args.embodiment_tag}")
     log.info(f"  Trials/task:      {args.num_trials}")
     log.info(f"  Log dir:          {log_dir}")
+    log.info(f"  Server python:    {' '.join(server_cmd_prefix)}")
+    log.info(f"  Client python:    {' '.join(client_cmd_prefix)}")
     log.info("")
 
     if num_experiments == 0:
@@ -220,8 +252,6 @@ def main(args: Args) -> None:
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    python = sys.executable
-
     # --- Launch persistent servers (one per GPU) ---
     log.info("=== Launching policy servers ===")
     for gpu_id in range(num_gpus):
@@ -232,11 +262,12 @@ def main(args: Args) -> None:
         with open(server_log, "w") as f:
             p = subprocess.Popen(
                 [
-                    python, "gr00t/eval/run_gr00t_server.py",
+                    *server_cmd_prefix, "gr00t/eval/run_gr00t_server.py",
                     "--model-path", args.model_path,
                     "--embodiment-tag", args.embodiment_tag,
                     "--use-sim-policy-wrapper",
                     "--port", str(port),
+                    "--seed", str(args.seed),
                 ],
                 env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)},
                 stdout=f,
@@ -282,7 +313,7 @@ def main(args: Args) -> None:
 
             video_dir = os.path.join(log_dir, f"videos_{tag}")
             client_cmd = [
-                python, "gr00t/eval/rollout_policy_with_latency.py",
+                *client_cmd_prefix, "gr00t/eval/rollout_policy_with_latency.py",
                 "--policy_client_host", "127.0.0.1",
                 "--policy_client_port", str(port),
                 "--env_name", env_name,
@@ -294,12 +325,17 @@ def main(args: Args) -> None:
                 "--n_action_steps", str(exp.n_action_steps),
                 "--results_json_path", results_json,
                 "--video_dir", video_dir,
+                "--seed", str(args.seed),
+                *(["--extend_episode_budget"] if args.extend_episode_budget
+                  else ["--no-extend_episode_budget"]),
             ]
 
             client_env = {
                 **os.environ,
                 "MUJOCO_GL": "egl",
-                "MUJOCO_EGL_DEVICE_ID": str(gpu_id),
+                # Clients only need EGL for MuJoCo rendering, not CUDA.
+                # Always use EGL device 0 to avoid errors on single-GPU machines.
+                "MUJOCO_EGL_DEVICE_ID": "0",
             }
 
             with open(client_log, "w") as f:
@@ -326,7 +362,7 @@ def main(args: Args) -> None:
 
     # --- Summarize ---
     log.info(f"=== All {num_experiments} runs complete ({num_skipped} skipped). ===")
-    subprocess.run([python, "scripts/eval/summarize_latency_sweep.py", log_dir])
+    subprocess.run([*server_cmd_prefix, "scripts/eval/summarize_latency_sweep.py", log_dir])
 
 
 if __name__ == "__main__":

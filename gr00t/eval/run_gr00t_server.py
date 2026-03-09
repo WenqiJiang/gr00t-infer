@@ -1,11 +1,19 @@
+# NOTE on reproducibility: even with fixed seeds (--seed), results may vary across
+# runs due to GPU non-determinism (CUDA, cuDNN), async vectorized env scheduling,
+# and floating-point non-associativity in MuJoCo physics. The best way to report
+# reliable accuracy is to run a large number of episodes (50+) and report mean ± stderr.
+
 from dataclasses import dataclass
 import json
 import os
+import random
 
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from gr00t.policy.replay_policy import ReplayPolicy
 from gr00t.policy.server_client import PolicyServer
+import numpy as np
+import torch
 import tyro
 
 
@@ -49,9 +57,18 @@ class ServerConfig:
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
+    seed: int = 42
+    """Random seed for reproducibility (seeds torch, numpy, random)"""
+
 
 def main(config: ServerConfig):
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
+
     print("Starting GR00T inference server...")
+    print(f"  Seed: {config.seed}")
     print(f"  Embodiment tag: {config.embodiment_tag}")
     print(f"  Model path: {config.model_path}")
     print(f"  Device: {config.device}")
