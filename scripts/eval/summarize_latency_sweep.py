@@ -2,21 +2,18 @@
 
 Usage:
     uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/
+    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/ \
+        --staleness 0 --tasks CoffeeSetupMug_PandaOmron_Env
+    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/ \
+        --latencies 0 5 10 --n-action-steps 8
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import pathlib
 import re
-import sys
-
-
-def _fmt_val(value, fmt: str) -> str:
-    """Format a value, returning '—' if None."""
-    if value is None:
-        return f"{'—':>10}"
-    return f"{value:{fmt}}"
 
 
 def _print_table(
@@ -121,17 +118,37 @@ def _print_table(
 
 
 def main():
-    results_dir = (
-        pathlib.Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else pathlib.Path("data/robocasa/latency_sweep")
+    parser = argparse.ArgumentParser(description="Summarize latency sweep results.")
+    parser.add_argument(
+        "results_dir",
+        nargs="?",
+        default="data/robocasa/latency_sweep",
+        help="Directory containing results_*.json files",
     )
+    parser.add_argument(
+        "--tasks", nargs="+", default=None,
+        help="Filter to these task names (default: all)",
+    )
+    parser.add_argument(
+        "--latencies", nargs="+", type=int, default=None,
+        help="Filter to these latency values (default: all)",
+    )
+    parser.add_argument(
+        "--n-action-steps", nargs="+", type=int, default=None,
+        help="Filter to these n_action_steps values (default: all)",
+    )
+    parser.add_argument(
+        "--staleness", nargs="+", type=int, default=None,
+        help="Filter to these staleness values (default: all). Use --staleness 0 for sync only.",
+    )
+    args = parser.parse_args()
 
+    results_dir = pathlib.Path(args.results_dir)
     result_files = sorted(results_dir.glob("results_*.json"))
 
     if not result_files:
         print(f"No results_*.json files found in {results_dir}")
-        sys.exit(1)
+        raise SystemExit(1)
 
     all_results = []
     for path in result_files:
@@ -152,6 +169,20 @@ def main():
             data.setdefault("staleness", 0)
         all_results.append(data)
 
+    # Apply filters.
+    if args.tasks:
+        all_results = [r for r in all_results if r["task"] in args.tasks]
+    if args.latencies is not None:
+        all_results = [r for r in all_results if r["latency"] in args.latencies]
+    if args.n_action_steps is not None:
+        all_results = [r for r in all_results if r["n_action_steps"] in args.n_action_steps]
+    if args.staleness is not None:
+        all_results = [r for r in all_results if r["staleness"] in args.staleness]
+
+    if not all_results:
+        print("No results match the given filters.")
+        raise SystemExit(1)
+
     tasks = sorted(set(r["task"] for r in all_results))
     latencies = sorted(set(r["latency"] for r in all_results))
     nact_vals = sorted(set(r["n_action_steps"] for r in all_results))
@@ -164,8 +195,23 @@ def main():
         for r in all_results
     }
 
+    # Build filter description for header.
+    filters = []
+    if args.tasks:
+        filters.append(f"tasks={args.tasks}")
+    if args.latencies is not None:
+        filters.append(f"latencies={args.latencies}")
+    if args.n_action_steps is not None:
+        filters.append(f"nact={args.n_action_steps}")
+    if args.staleness is not None:
+        filters.append(f"staleness={args.staleness}")
+    filter_str = f" | filters: {', '.join(filters)}" if filters else ""
+
     print("=" * 90)
-    print(f"Latency Sweep Summary — {len(tasks)} task(s), {len(all_results)} experiments")
+    print(
+        f"Latency Sweep Summary — {len(tasks)} task(s), "
+        f"{len(all_results)} experiments{filter_str}"
+    )
     print("=" * 90)
 
     # Metrics to display: (title, key, format)
@@ -186,12 +232,7 @@ def main():
                 "success_rate_original_budget", r["success_rate"]
             )
         # Old results stored macro-step counts; convert to raw if needed.
-        scale = r.get("total_action_steps_per_macro")
-        if scale and scale > 1:
-            # avg_steps should already be raw in new results; skip if already scaled.
-            pass
-        elif "episode_lengths" in r and "episode_lengths_raw" not in r:
-            # Old format: episode_lengths are macro steps, avg_steps are macro steps.
+        if "episode_lengths" in r and "episode_lengths_raw" not in r:
             lat = r.get("latency", 0)
             stale = r.get("staleness", 0)
             nact = r.get("n_action_steps", 8)

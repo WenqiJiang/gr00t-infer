@@ -1,4 +1,5 @@
 =*
+run*.sh
 
 # Finetune datasets
 /examples/GR00T-WholeBodyControl/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim/

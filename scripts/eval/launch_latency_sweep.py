@@ -25,7 +25,6 @@ reliable accuracy is to run a large number of episodes (50+) and report mean ± 
 import dataclasses
 import itertools
 import logging
-import math
 import os
 import shutil
 import signal
@@ -130,7 +129,7 @@ def wait_and_kill(procs: list[subprocess.Popen]) -> None:
 
 def exp_tag(exp: Experiment) -> str:
     tag = f"{exp.task}_lat{exp.latency}_nact{exp.n_action_steps}"
-    if exp.staleness is not None:
+    if exp.staleness is not None and exp.staleness > 0:
         tag += f"_stale{exp.staleness}"
     return tag
 
@@ -166,6 +165,11 @@ def wait_for_server(port: int, timeout: int = 300) -> bool:
 
 
 def main(args: Args) -> None:
+    # Timestamp for log filenames so concurrent runs on different servers don't collide.
+    import datetime
+
+    run_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     num_gpus = args.num_gpus or detect_num_gpus()
 
     # Build experiment list.
@@ -203,7 +207,6 @@ def main(args: Args) -> None:
     num_total = len(all_experiments)
     num_skipped = num_total - len(experiments)
     num_experiments = len(experiments)
-    num_rounds = math.ceil(num_experiments / num_gpus) if num_experiments > 0 else 0
 
     # Server runs via "uv run python" (needs main project deps).
     # Client may need a different venv (e.g., robocasa).
@@ -227,7 +230,7 @@ def main(args: Args) -> None:
     log.info(f"  Staleness:        {args.staleness or 'sync (staleness=0)'}")
     log.info(f"  Experiments:      {num_experiments} ({num_skipped} skipped, {num_total} total)")
     log.info(f"  GPUs:             {num_gpus}")
-    log.info(f"  Rounds:           {num_rounds}")
+    log.info(f"  Scheduling:       work-queue (GPUs pick up next job when idle)")
     log.info(f"  Model:            {args.model_path}")
     log.info(f"  Embodiment:       {args.embodiment_tag}")
     log.info(f"  Trials/task:      {args.num_trials}")
@@ -256,7 +259,7 @@ def main(args: Args) -> None:
     log.info("=== Launching policy servers ===")
     for gpu_id in range(num_gpus):
         port = args.base_port + gpu_id
-        server_log = os.path.join(log_dir, f"server_gpu{gpu_id}.log")
+        server_log = os.path.join(log_dir, f"server_gpu{gpu_id}_{run_ts}.log")
         log.info(f"  [server] GPU {gpu_id} | port {port} | log: {server_log}")
 
         with open(server_log, "w") as f:
@@ -287,74 +290,108 @@ def main(args: Args) -> None:
             cleanup()
     log.info("")
 
-    # --- Run experiments in rounds ---
-    for round_idx in range(num_rounds):
-        start = round_idx * num_gpus
-        end = min(start + num_gpus, num_experiments)
-        round_exps = experiments[start:end]
+    # --- Helper: launch a client experiment on a given GPU ---
+    client_env = {
+        **os.environ,
+        "MUJOCO_GL": "egl",
+        # Clients only need EGL for MuJoCo rendering, not CUDA.
+        # Always use EGL device 0 to avoid errors on single-GPU machines.
+        "MUJOCO_EGL_DEVICE_ID": "0",
+    }
 
-        log.info(f"=== Round {round_idx + 1}/{num_rounds}: experiments {start}..{end - 1} ===")
+    def launch_client(exp: Experiment, gpu_id: int) -> subprocess.Popen:
+        port = args.base_port + gpu_id
+        tag = exp_tag(exp)
+        env_name = f"{args.env_prefix}/{exp.task}"
+        results_json = os.path.join(log_dir, f"results_{tag}.json")
+        client_log = os.path.join(log_dir, f"client_{tag}_{run_ts}.log")
+        video_dir = os.path.join(log_dir, f"videos_{tag}")
 
-        client_procs: list[subprocess.Popen] = []
+        stale_str = str(exp.staleness) if exp.staleness is not None else "sync"
+        log.info(
+            f"  [client] GPU {gpu_id} | {exp.task} | latency {exp.latency}"
+            f" | nact {exp.n_action_steps} | staleness {stale_str}"
+        )
 
-        for slot, exp in enumerate(round_exps):
-            gpu_id = slot % num_gpus
-            port = args.base_port + gpu_id
-            tag = exp_tag(exp)
-            env_name = f"{args.env_prefix}/{exp.task}"
-            results_json = os.path.join(log_dir, f"results_{tag}.json")
-            client_log = os.path.join(log_dir, f"client_{tag}.log")
+        client_cmd = [
+            *client_cmd_prefix, "gr00t/eval/rollout_policy_with_latency.py",
+            "--policy_client_host", "127.0.0.1",
+            "--policy_client_port", str(port),
+            "--env_name", env_name,
+            "--n_episodes", str(args.num_trials),
+            "--n_envs", str(args.n_envs),
+            "--max_episode_steps", str(args.max_episode_steps),
+            "--latency", str(exp.latency),
+            "--staleness", str(exp.staleness if exp.staleness is not None else 0),
+            "--n_action_steps", str(exp.n_action_steps),
+            "--results_json_path", results_json,
+            "--video_dir", video_dir,
+            "--seed", str(args.seed),
+            *(["--extend_episode_budget"] if args.extend_episode_budget
+              else ["--no-extend_episode_budget"]),
+        ]
 
-            stale_str = str(exp.staleness) if exp.staleness is not None else "sync"
-            log.info(
-                f"  [client] GPU {gpu_id} | {exp.task} | latency {exp.latency}"
-                f" | nact {exp.n_action_steps} | staleness {stale_str}"
+        with open(client_log, "w") as f:
+            p = subprocess.Popen(
+                client_cmd,
+                env=client_env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
             )
+        all_procs.append(p)
+        return p
 
-            video_dir = os.path.join(log_dir, f"videos_{tag}")
-            client_cmd = [
-                *client_cmd_prefix, "gr00t/eval/rollout_policy_with_latency.py",
-                "--policy_client_host", "127.0.0.1",
-                "--policy_client_port", str(port),
-                "--env_name", env_name,
-                "--n_episodes", str(args.num_trials),
-                "--n_envs", str(args.n_envs),
-                "--max_episode_steps", str(args.max_episode_steps),
-                "--latency", str(exp.latency),
-                "--staleness", str(exp.staleness if exp.staleness is not None else 0),
-                "--n_action_steps", str(exp.n_action_steps),
-                "--results_json_path", results_json,
-                "--video_dir", video_dir,
-                "--seed", str(args.seed),
-                *(["--extend_episode_budget"] if args.extend_episode_budget
-                  else ["--no-extend_episode_budget"]),
-            ]
+    # --- Run experiments with work-queue scheduling ---
+    # Each GPU picks up the next experiment as soon as it finishes the current one,
+    # so no GPU sits idle waiting for others to complete a round.
+    exp_queue = list(experiments)  # work queue
+    # active_jobs: gpu_id -> (Popen, Experiment)
+    active_jobs: dict[int, tuple[subprocess.Popen, Experiment]] = {}
+    completed = 0
+    skipped_at_dispatch = 0
 
-            client_env = {
-                **os.environ,
-                "MUJOCO_GL": "egl",
-                # Clients only need EGL for MuJoCo rendering, not CUDA.
-                # Always use EGL device 0 to avoid errors on single-GPU machines.
-                "MUJOCO_EGL_DEVICE_ID": "0",
-            }
+    def pop_next_experiment() -> Experiment | None:
+        """Pop the next experiment from the queue, skipping any whose results
+        already exist (e.g., written by a concurrent run on another machine)."""
+        nonlocal skipped_at_dispatch
+        while exp_queue:
+            exp = exp_queue.pop(0)
+            results_json = os.path.join(log_dir, f"results_{exp_tag(exp)}.json")
+            if not args.overwrite and os.path.exists(results_json):
+                skipped_at_dispatch += 1
+                log.info(f"  Skipping {exp_tag(exp)} (results appeared concurrently)")
+                continue
+            return exp
+        return None
 
-            with open(client_log, "w") as f:
-                p = subprocess.Popen(
-                    client_cmd,
-                    env=client_env,
-                    stdout=f,
-                    stderr=subprocess.STDOUT,
+    # Seed initial jobs (one per GPU).
+    for gpu_id in range(num_gpus):
+        exp = pop_next_experiment()
+        if exp is None:
+            break
+        active_jobs[gpu_id] = (launch_client(exp, gpu_id), exp)
+
+    log.info(f"  Monitor: tail -f {log_dir}/client_*.log")
+
+    # Poll for finished jobs and dispatch next experiment to freed GPU.
+    while active_jobs:
+        for gpu_id in list(active_jobs):
+            proc, exp = active_jobs[gpu_id]
+            ret = proc.poll()
+            if ret is not None:
+                completed += 1
+                status = "OK" if ret == 0 else f"FAILED (exit {ret})"
+                log.info(
+                    f"  [{completed}/{num_experiments - skipped_at_dispatch}] "
+                    f"GPU {gpu_id} finished {exp_tag(exp)} — {status}"
                 )
-            client_procs.append(p)
-            all_procs.append(p)
-
-        log.info(f"  Monitor: tail -f {log_dir}/client_*.log")
-
-        # Wait for all clients in this round to finish.
-        for p in client_procs:
-            p.wait()
-
-        log.info(f"  Round {round_idx + 1} complete.\n")
+                del active_jobs[gpu_id]
+                # Dispatch next experiment to this GPU.
+                next_exp = pop_next_experiment()
+                if next_exp is not None:
+                    active_jobs[gpu_id] = (launch_client(next_exp, gpu_id), next_exp)
+        if active_jobs:
+            time.sleep(2)
 
     # --- Kill servers ---
     log.info("Shutting down policy servers...")
