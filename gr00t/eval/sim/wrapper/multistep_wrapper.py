@@ -128,6 +128,7 @@ class MultiStepWrapper(gym.Wrapper):
         max_episode_steps=None,
         reward_agg_method="max",
         terminate_on_success=False,
+        cache_intermediate_obs=False,
     ):
         """
         video_delta_indices: np.ndarray[int], please check `assert_delta_indices` to see the requirements
@@ -168,6 +169,7 @@ class MultiStepWrapper(gym.Wrapper):
         self.done = list()
         self.info = defaultdict(lambda: deque(maxlen=self.n_action_steps + 1))
         self.terminate_on_success = terminate_on_success
+        self.cache_intermediate_obs = cache_intermediate_obs
 
     def convert_observation_space(self, observation_space, video_horizon, state_horizon):
         """
@@ -253,12 +255,13 @@ class MultiStepWrapper(gym.Wrapper):
         states = []
         rewards = []
         dones = []
+        truncated = False
         for step in range(self.n_action_steps):
             act = {}
             for key, value in action.items():
                 act[key] = value[step, :]
             if len(self.done) > 0 and self.done[-1]:
-                # termination
+                # termination or truncation already signaled
                 break
             observation, reward, done, truncated, info = super().step(act)
             # TODO: assign meaningful values
@@ -271,14 +274,19 @@ class MultiStepWrapper(gym.Wrapper):
             if (self.max_episode_steps is not None) and (
                 len(self.reward) >= self.max_episode_steps
             ):
-                # truncation
-                done = True
-            self.done.append(done)
+                # truncation (not termination)
+                truncated = True
+            # Track episode-ended (terminated OR truncated) to stop the inner
+            # loop and avoid stepping the inner env past its episode boundary.
+            self.done.append(done or truncated)
             self._add_info(info)
 
         observation = self._get_obs(self.video_delta_indices, self.state_delta_indices)
         reward = aggregate(self.reward, self.reward_agg_method)
-        done = aggregate(self.done, "max")
+        # `done` (terminated) should be True only if the env actually terminated,
+        # not merely truncated. Use the raw `dones` list (from inner env's
+        # `terminated` signal) rather than `self.done` which includes truncation.
+        done = bool(np.max(dones)) if dones else bool(aggregate(self.done, "max"))
         info = dict_take_last_n(self.info, self.n_action_steps)
         states = np.array(states)
         rewards = np.array(rewards)
@@ -302,6 +310,12 @@ class MultiStepWrapper(gym.Wrapper):
             The length is `n_action_steps`.
             """
             info["intermediate_signals"] = compress_dict_list(list(info["intermediate_signals"]))
+
+        if self.cache_intermediate_obs:
+            # Expose raw observations from each inner step for sub-macro-step
+            # staleness tracking. Each entry is a raw obs dict (not stacked).
+            n_steps_taken = len(dones)
+            info["_intermediate_obs"] = list(self.obs)[-n_steps_taken:]
 
         if self.terminate_on_success and any(info["success"]):
             # Terminate after this step.

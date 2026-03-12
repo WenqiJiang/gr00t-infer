@@ -66,6 +66,7 @@ class MultiStepConfig:
     n_action_steps: int = 16
     max_episode_steps: int = 720
     terminate_on_success: bool = False
+    cache_intermediate_obs: bool = False
 
 
 @dataclass
@@ -245,6 +246,7 @@ def create_eval_env(
         n_action_steps=wrapper_configs.multistep.n_action_steps,
         max_episode_steps=wrapper_configs.multistep.max_episode_steps,
         terminate_on_success=wrapper_configs.multistep.terminate_on_success,
+        cache_intermediate_obs=wrapper_configs.multistep.cache_intermediate_obs,
     )
     return env
 

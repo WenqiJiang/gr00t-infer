@@ -144,6 +144,10 @@ def run_rollout_with_latency(
     # Override MultiStepWrapper's n_action_steps to include hold padding.
     wrapper_configs.multistep.n_action_steps = total_action_steps
 
+    # Enable intermediate observation caching for sub-macro-step staleness.
+    if staleness > 0:
+        wrapper_configs.multistep.cache_intermediate_obs = True
+
     start_time = time.time()
     n_envs = min(n_envs, n_episodes)
     print(
@@ -191,24 +195,23 @@ def run_rollout_with_latency(
     # Last model-predicted actions for hold-action generation: {key: (B, n_action_steps, D)}
     last_model_actions = None
 
-    # -- Staleness state: per-env observation cache --
-    # Staleness is approximated at macro-step granularity:
-    #   stale_macro_steps = ceil(staleness / total_action_steps)
+    # -- Staleness state: per-env raw observation cache --
+    # Each cache stores individual raw-step observations so that staleness=N
+    # means the policy sees an observation from exactly N raw env steps ago.
     if staleness > 0:
-        stale_macro_steps = max(1, -(-staleness // total_action_steps))  # ceil division
-        obs_caches = [
-            collections.deque(maxlen=stale_macro_steps + 1) for _ in range(n_envs)
+        raw_obs_caches = [
+            collections.deque(maxlen=staleness + 1) for _ in range(n_envs)
         ]
 
     # Initial reset
     observations, _ = env.reset(seed=seed)
     policy.reset()
 
-    # Cache initial observations for staleness
+    # Seed staleness caches with initial observation (treated as 1 raw obs).
     if staleness > 0:
         for env_idx in range(n_envs):
             per_env_obs = {k: v[env_idx] for k, v in observations.items()}
-            obs_caches[env_idx].append(per_env_obs)
+            raw_obs_caches[env_idx].append(per_env_obs)
 
     i = 0
 
@@ -216,11 +219,15 @@ def run_rollout_with_latency(
     while completed_episodes < n_episodes:
         # -- Select observation for policy (fresh or stale) --
         if staleness > 0 and last_model_actions is not None:
-            # Build batched stale observation from per-env caches
+            # Build batched stale observation from per-env raw-step caches.
+            # Each cache has up to (staleness + 1) raw observations.
+            # Index 0 = oldest, -1 = newest. We want the one that is
+            # `staleness` raw steps behind the latest.
             stale_obs_parts = {k: [] for k in observations}
             for env_idx in range(n_envs):
-                cache = obs_caches[env_idx]
-                idx = max(0, len(cache) - 1 - stale_macro_steps)
+                cache = raw_obs_caches[env_idx]
+                # Pick observation `staleness` steps back, or oldest available.
+                idx = max(0, len(cache) - 1 - staleness)
                 for k in observations:
                     stale_obs_parts[k].append(cache[idx][k])
             policy_obs = {}
@@ -367,15 +374,18 @@ def run_rollout_with_latency(
 
                 # Reset staleness cache for this env
                 if staleness > 0:
-                    obs_caches[env_idx].clear()
+                    raw_obs_caches[env_idx].clear()
 
         observations = next_obs
 
-        # Cache observations for staleness
-        if staleness > 0:
+        # Cache raw-step observations for staleness.
+        # _intermediate_obs contains one raw observation per inner env step,
+        # giving us sub-macro-step resolution for staleness.
+        if staleness > 0 and "_intermediate_obs" in env_infos:
             for env_idx in range(n_envs):
-                per_env_obs = {k: v[env_idx] for k, v in next_obs.items()}
-                obs_caches[env_idx].append(per_env_obs)
+                intermediate = env_infos["_intermediate_obs"][env_idx]
+                for raw_obs in intermediate:
+                    raw_obs_caches[env_idx].append(raw_obs)
 
     pbar.close()
 

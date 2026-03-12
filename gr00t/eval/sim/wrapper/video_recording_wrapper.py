@@ -152,6 +152,7 @@ class VideoRecordingWrapper(gym.Wrapper):
         self.step_count = 0
 
         self.is_success = False
+        self.is_done = False
 
     def _resize_frames_to_common_height(self, frames):
         """
@@ -315,7 +316,7 @@ class VideoRecordingWrapper(gym.Wrapper):
             #     new_filestem += f"_{case_semantic}_clf-rate{int(contact_language_following_rate)}"
 
             new_file_path = self.video_dir / f"{new_filestem}.mp4"
-            if previous_step_count >= self.max_episode_steps or self.is_success:
+            if previous_step_count >= self.max_episode_steps or self.is_success or self.is_done:
                 os.rename(self.file_path, new_file_path)
             else:
                 print(
@@ -324,6 +325,7 @@ class VideoRecordingWrapper(gym.Wrapper):
                 os.remove(self.file_path)
 
         self.is_success = False
+        self.is_done = False
         # "intermediate_signals" contain the metrics for 5DC tasks to indicate language following
         self.intermediate_signals = {}
 
@@ -415,6 +417,10 @@ class VideoRecordingWrapper(gym.Wrapper):
 
             self.video_recorder.write_frame(frame)
 
+        # result = (observation, reward, terminated, truncated, info)
+        terminated = result[2]
+        truncated = result[3]
+        self.is_done |= (terminated or truncated)
         info = result[-1]
         self.is_success |= info["success"]
 

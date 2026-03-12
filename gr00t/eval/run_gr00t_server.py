@@ -104,6 +104,24 @@ def main(config: ServerConfig):
     else:
         raise ValueError("Either model_path or dataset_path must be provided")
 
+    # Print model info after loading.
+    if isinstance(policy, Gr00tPolicy):
+        mc = policy.modality_configs
+        action_horizon = len(mc["action"].delta_indices)
+        state_keys = mc["state"].modality_keys
+        action_keys = mc["action"].modality_keys
+        video_keys = mc["video"].modality_keys
+        model_action_horizon = policy.model.config.action_horizon
+        print(f"\n=== Model Info ===")
+        print(f"  Model action_horizon (max): {model_action_horizon}")
+        print(f"  Embodiment action_horizon:  {action_horizon}")
+        print(f"  Action delta_indices:       {mc['action'].delta_indices}")
+        print(f"  Video keys:   {video_keys}")
+        print(f"  State keys:   {state_keys}")
+        print(f"  Action keys:  {action_keys}")
+        print(f"  Max n_action_steps you can use: {action_horizon}")
+        print(f"==================\n")
+
     # Apply sim policy wrapper if needed
     if config.use_sim_policy_wrapper:
         from gr00t.policy.gr00t_policy import Gr00tSimPolicyWrapper

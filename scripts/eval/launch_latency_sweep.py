@@ -12,6 +12,10 @@ Usage:
     uv run python scripts/eval/launch_latency_sweep.py \
         --tasks CoffeeSetupMug_PandaOmron_Env \
         --staleness 0 5 10 --num-trials 50
+    uv run python scripts/eval/launch_latency_sweep.py \
+        --tasks CoffeeSetupMug_PandaOmron_Env \
+        --latencies 0 5 10 20 --n-action-steps 1 4 8 16 \
+        --auto-staleness
 
 After completion, view results:
     uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/
@@ -53,7 +57,12 @@ class Args:
 
     staleness: list[int] = dataclasses.field(default_factory=list)
     """Observation staleness values for async inference. Empty = sync only (staleness=0).
-    When set, only valid combos where staleness <= latency are generated."""
+    When set, only valid combos where staleness <= min(latency, n_action_steps) are kept."""
+
+    auto_staleness: bool = False
+    """Auto-generate staleness values for each (latency, n_action_steps) combo.
+    Generates [0, 1, 2, 4, 8, ...] up to min(latency, n_action_steps).
+    Overrides --staleness if both are set."""
 
     model_path: str = "nvidia/GR00T-N1.6-3B"
     """Path to the model checkpoint."""
@@ -173,13 +182,27 @@ def main(args: Args) -> None:
     num_gpus = args.num_gpus or detect_num_gpus()
 
     # Build experiment list.
-    if args.staleness:
+    if args.auto_staleness:
+        # Auto-generate staleness: [0, 1, 2, 4, 8, ...] up to min(latency, n_action_steps).
+        all_experiments = []
+        for task, lat, nact in itertools.product(
+            args.tasks, args.latencies, args.n_action_steps
+        ):
+            cap = min(lat, nact)
+            stale_vals = [0]
+            power = 0
+            while 2**power <= cap:
+                stale_vals.append(2**power)
+                power += 1
+            for stale in sorted(set(stale_vals)):
+                all_experiments.append(Experiment(task, lat, nact, stale))
+    elif args.staleness:
         all_experiments = [
             Experiment(task, lat, nact, stale)
             for task, lat, nact, stale in itertools.product(
                 args.tasks, args.latencies, args.n_action_steps, args.staleness
             )
-            if stale <= lat
+            if stale <= min(lat, nact)
         ]
     else:
         all_experiments = [
