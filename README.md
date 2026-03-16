@@ -369,6 +369,61 @@ To add a new benchmark:
 - **PointNav**: [Instructions](examples/PointNav/README.md)
 - **SO-100**: [Instructions](examples/SO100/README.md)
 
+### 4.3 Latency Sweep Evaluation
+
+We provide a suite of scripts to evaluate how inference latency affects policy performance in simulation. The sweep runs closed-loop rollouts across a range of artificial latency values and collects success rates.
+
+#### Running a Sweep
+
+Use `run.sh` to launch a latency sweep across RoboCasa tasks:
+
+```bash
+# All tasks, 8 GPUs (default)
+bash run.sh
+
+# Specific task group, custom settings
+bash run.sh --tasks stove --num-trials 50 --num-gpus 4
+
+# Multiple seeds for variance analysis
+for s in 1 2 3 4 5; do bash run.sh --tasks stove --seed $s; done
+```
+
+Results are saved to `data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/`.
+
+#### Analyzing Results
+
+The following scripts in `scripts/eval/` process the sweep results. All assume the results directory as the first argument:
+
+```bash
+RESULTS=data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/
+```
+
+**Summarize** — Print success rate and average steps tables (latency x n_action_steps):
+```bash
+uv run python scripts/eval/summarize_latency_sweep.py $RESULTS
+uv run python scripts/eval/summarize_latency_sweep.py $RESULTS --tasks CoffeeSetupMug_PandaOmron_Env
+```
+
+**Plot** — Generate per-task, compare-nact, and compare-staleness plots:
+```bash
+uv run python scripts/eval/plot_latency_sweep.py $RESULTS
+uv run python scripts/eval/plot_latency_sweep.py $RESULTS --plot-type compare_nact
+uv run python scripts/eval/plot_latency_sweep.py $RESULTS --plot-type compare_staleness --n-action-steps 8
+```
+
+**Statistical Analysis** — Spearman correlation and Wilson confidence intervals:
+```bash
+uv run python scripts/eval/analyze_latency_sweep.py $RESULTS
+uv run python scripts/eval/analyze_latency_sweep.py $RESULTS --plot --output-dir plots/analysis/
+```
+
+**Cross-Seed Variance** — Show accuracy distribution across seeds (requires `seed*/` subdirectories). Prints mean +/- 1 SD (~68%) and +/- 2 SD (~95%) tables, and generates violin/box plots:
+```bash
+uv run python scripts/eval/variance_latency_sweep.py $RESULTS
+uv run python scripts/eval/variance_latency_sweep.py $RESULTS --plot-style box
+uv run python scripts/eval/variance_latency_sweep.py $RESULTS --tasks TurnOnStove_PandaOmron_Env --latencies 0 4 8 16
+```
+
 
 # Contributing
 

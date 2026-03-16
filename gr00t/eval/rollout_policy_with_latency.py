@@ -39,6 +39,7 @@ reliable accuracy is to run a large number of episodes (50+) and report mean ± 
 
 import argparse
 import collections
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
@@ -208,9 +209,17 @@ def run_rollout_with_latency(
     policy.reset()
 
     # Seed staleness caches with initial observation (treated as 1 raw obs).
+    # Strip the temporal (T) dimension that _get_obs adds so cached entries
+    # are consistent with _intermediate_obs (which are raw single-step obs).
     if staleness > 0:
         for env_idx in range(n_envs):
-            per_env_obs = {k: v[env_idx] for k, v in observations.items()}
+            per_env_obs = {}
+            for k, v in observations.items():
+                val = v[env_idx]
+                if (k.startswith("video") or k.startswith("state")) and isinstance(val, np.ndarray):
+                    # _get_obs stacks along axis=0 for T; take the last frame.
+                    val = val[-1]
+                per_env_obs[k] = val
             raw_obs_caches[env_idx].append(per_env_obs)
 
     i = 0
@@ -235,6 +244,11 @@ def run_rollout_with_latency(
                 if isinstance(parts[0], str):
                     policy_obs[k] = tuple(parts)
                 else:
+                    # Raw cached obs lack the temporal (T) dimension that
+                    # MultiStepWrapper._get_obs adds. Add T=1 so the
+                    # shape matches what the policy expects: (B, T, ...).
+                    if k.startswith("video") or k.startswith("state"):
+                        parts = [np.expand_dims(p, axis=0) for p in parts]
                     policy_obs[k] = np.stack(parts, axis=0)
         else:
             policy_obs = observations
@@ -372,9 +386,19 @@ def run_rollout_with_latency(
                     for k in last_model_actions:
                         last_model_actions[k][env_idx] = 0.0
 
-                # Reset staleness cache for this env
+                # Reset staleness cache for this env and seed with the
+                # auto-reset observation so the cache is never empty.
                 if staleness > 0:
                     raw_obs_caches[env_idx].clear()
+                    per_env_obs = {}
+                    for k, v in next_obs.items():
+                        val = v[env_idx]
+                        if (k.startswith("video") or k.startswith("state")) and isinstance(
+                            val, np.ndarray
+                        ):
+                            val = val[-1]
+                        per_env_obs[k] = val
+                    raw_obs_caches[env_idx].append(per_env_obs)
 
         observations = next_obs
 
@@ -384,6 +408,8 @@ def run_rollout_with_latency(
         if staleness > 0 and "_intermediate_obs" in env_infos:
             for env_idx in range(n_envs):
                 intermediate = env_infos["_intermediate_obs"][env_idx]
+                if intermediate is None:
+                    continue
                 for raw_obs in intermediate:
                     raw_obs_caches[env_idx].append(raw_obs)
 
@@ -605,55 +631,92 @@ if __name__ == "__main__":
 
     if args.results_json_path:
         import json
+        import tempfile
 
-        results_path = Path(args.results_json_path)
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        orig_successes = results[2].get("episode_successes_original_budget", [])
-        results_data = {
-            "env_name": results[0],
-            "task": args.env_name.split("/")[-1] if "/" in args.env_name else args.env_name,
-            "latency": args.latency,
-            "staleness": args.staleness,
-            "n_action_steps": args.n_action_steps,
-            "n_episodes": len(results[1]),
-            "max_episode_steps": results[2].get("original_max_steps", args.max_episode_steps),
-            "extended_max_episode_steps": results[2].get("extended_max_steps"),
-            "success_rate_extended_budget": float(np.mean(results[1])),
-            "success_rate_original_budget": float(np.mean(orig_successes))
-            if orig_successes
-            else float(np.mean(results[1])),
-            "episode_successes": [bool(s) for s in results[1]],
-            "episode_successes_original_budget": [bool(s) for s in orig_successes],
-            "episode_lengths_raw": results[2].get("episode_lengths_raw", []),
-            "episode_lengths_macro": results[2].get("episode_lengths_macro", []),
-            "total_action_steps_per_macro": results[2].get("total_action_steps_per_macro"),
-            "avg_steps_all": float(np.mean(results[2]["episode_lengths_raw"]))
-            if "episode_lengths_raw" in results[2]
-            else None,
-            "avg_steps_succeeded": float(
-                np.mean([
-                    l
-                    for l, s in zip(results[2].get("episode_lengths_raw", []), results[1])
-                    if s
-                ])
+        results_path = Path(args.results_json_path).resolve()
+
+        # Pre-check: skip writing if a valid result already exists (e.g. from
+        # a concurrent run that finished first).
+        skip_write = False
+        if results_path.exists():
+            try:
+                with open(results_path) as f:
+                    json.load(f)
+                print(f"Results already exist (valid JSON), skipping write: {results_path}")
+                skip_write = True
+            except (json.JSONDecodeError, OSError):
+                print(f"Existing results file is corrupt, will overwrite: {results_path}")
+
+        if not skip_write:
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            orig_successes = results[2].get("episode_successes_original_budget", [])
+            results_data = {
+                "env_name": results[0],
+                "task": args.env_name.split("/")[-1] if "/" in args.env_name else args.env_name,
+                "latency": args.latency,
+                "staleness": args.staleness,
+                "n_action_steps": args.n_action_steps,
+                "n_episodes": len(results[1]),
+                "max_episode_steps": results[2].get(
+                    "original_max_steps", args.max_episode_steps
+                ),
+                "extended_max_episode_steps": results[2].get("extended_max_steps"),
+                "success_rate_extended_budget": float(np.mean(results[1])),
+                "success_rate_original_budget": float(np.mean(orig_successes))
+                if orig_successes
+                else float(np.mean(results[1])),
+                "episode_successes": [bool(s) for s in results[1]],
+                "episode_successes_original_budget": [bool(s) for s in orig_successes],
+                "episode_lengths_raw": results[2].get("episode_lengths_raw", []),
+                "episode_lengths_macro": results[2].get("episode_lengths_macro", []),
+                "total_action_steps_per_macro": results[2].get(
+                    "total_action_steps_per_macro"
+                ),
+                "avg_steps_all": float(np.mean(results[2]["episode_lengths_raw"]))
+                if "episode_lengths_raw" in results[2]
+                else None,
+                "avg_steps_succeeded": float(
+                    np.mean([
+                        l
+                        for l, s in zip(
+                            results[2].get("episode_lengths_raw", []), results[1]
+                        )
+                        if s
+                    ])
+                )
+                if any(results[1])
+                else None,
+            }
+            if results[2]:
+                for k, v in results[2].items():
+                    if isinstance(v, (int, float, np.floating, np.integer)):
+                        results_data[k] = (
+                            float(v) if isinstance(v, (np.floating, np.integer)) else v
+                        )
+                    elif isinstance(v, list):
+                        serialized = []
+                        for x in v:
+                            if isinstance(x, (np.floating, np.integer)):
+                                serialized.append(float(x))
+                            elif isinstance(x, np.ndarray):
+                                serialized.append(x.tolist())
+                            else:
+                                serialized.append(x)
+                        results_data[k] = serialized
+            # Atomic write: write to a temp file first, then rename so readers
+            # never see a partially-written file.
+            fd, tmp_path = tempfile.mkstemp(
+                dir=results_path.parent, suffix=".tmp", prefix=results_path.stem
             )
-            if any(results[1])
-            else None,
-        }
-        if results[2]:
-            for k, v in results[2].items():
-                if isinstance(v, (int, float, np.floating, np.integer)):
-                    results_data[k] = float(v) if isinstance(v, (np.floating, np.integer)) else v
-                elif isinstance(v, list):
-                    serialized = []
-                    for x in v:
-                        if isinstance(x, (np.floating, np.integer)):
-                            serialized.append(float(x))
-                        elif isinstance(x, np.ndarray):
-                            serialized.append(x.tolist())
-                        else:
-                            serialized.append(x)
-                    results_data[k] = serialized
-        with open(results_path, "w") as f:
-            json.dump(results_data, f, indent=2)
-        print(f"Results saved to: {results_path}")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(results_data, f, indent=2)
+                os.replace(tmp_path, results_path)
+            except BaseException:
+                # Clean up temp file on any failure (including KeyboardInterrupt).
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            print(f"Results saved to: {results_path}")

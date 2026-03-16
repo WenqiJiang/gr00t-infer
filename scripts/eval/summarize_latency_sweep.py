@@ -1,10 +1,13 @@
 """Summarize results from a latency x n_action_steps (x staleness) sweep.
 
 Usage:
-    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/
-    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/ \
+    uv run python scripts/eval/summarize_latency_sweep.py \
+        data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/
+    uv run python scripts/eval/summarize_latency_sweep.py \
+        data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/ \
         --staleness 0 --tasks CoffeeSetupMug_PandaOmron_Env
-    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/ \
+    uv run python scripts/eval/summarize_latency_sweep.py \
+        data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/ \
         --latencies 0 5 10 --n-action-steps 8
 """
 
@@ -121,9 +124,8 @@ def main():
     parser = argparse.ArgumentParser(description="Summarize latency sweep results.")
     parser.add_argument(
         "results_dir",
-        nargs="?",
-        default="data/robocasa/latency_sweep",
-        help="Directory containing results_*.json files",
+        help="Directory containing results_*.json files"
+        " (e.g. data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/)",
     )
     parser.add_argument(
         "--tasks", nargs="+", default=None,
@@ -152,8 +154,12 @@ def main():
 
     all_results = []
     for path in result_files:
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"WARNING: skipping corrupt file {path}: {e}")
+            continue
         # Extract fields from filename as fallback.
         task_match = re.match(r"results_(.+?)_lat\d+", path.name)
         lat_match = re.search(r"lat(\d+)", path.name)

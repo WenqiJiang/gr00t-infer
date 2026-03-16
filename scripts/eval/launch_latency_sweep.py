@@ -18,7 +18,8 @@ Usage:
         --auto-staleness
 
 After completion, view results:
-    uv run python scripts/eval/summarize_latency_sweep.py data/robocasa/latency_sweep/
+    uv run python scripts/eval/summarize_latency_sweep.py \
+        data/latency_sweep/robocasa_panda_omron/GR00T-N1.6-3B/trials50/
 
 NOTE on reproducibility: even with fixed seeds (--seed), results may vary across
 runs due to GPU non-determinism (CUDA, cuDNN), async vectorized env scheduling,
@@ -97,8 +98,10 @@ class Args:
     server_wait: int = 300
     """Seconds to wait for each server to become ready."""
 
-    seed: int = 42
-    """Random seed for reproducibility."""
+    seed: int | None = None
+    """Random seed for reproducibility. When set, results are stored in a
+    seed-specific subdirectory (e.g. .../seed42/) to support variance analysis.
+    When not set, uses seed=42 with no subdirectory (default behavior)."""
 
     extend_episode_budget: bool = True
     """Extend max episode steps to compensate for hold actions during latency."""
@@ -212,7 +215,12 @@ def main(args: Args) -> None:
             )
         ]
 
-    log_dir = args.log_dir or f"data/robocasa/latency_sweep/trials{args.num_trials}"
+    model_name = os.path.basename(args.model_path.rstrip("/"))
+    effective_seed = args.seed if args.seed is not None else 42
+    default_log_dir = f"data/latency_sweep/{args.env_prefix}/{model_name}/trials{args.num_trials}"
+    if args.seed is not None:
+        default_log_dir += f"/seed{args.seed}"
+    log_dir = args.log_dir or default_log_dir
     os.makedirs(log_dir, exist_ok=True)
 
     # Skip experiments whose results already exist.
@@ -257,6 +265,7 @@ def main(args: Args) -> None:
     log.info(f"  Model:            {args.model_path}")
     log.info(f"  Embodiment:       {args.embodiment_tag}")
     log.info(f"  Trials/task:      {args.num_trials}")
+    log.info(f"  Seed:             {effective_seed}" + (" (explicit)" if args.seed is not None else " (default)"))
     log.info(f"  Log dir:          {log_dir}")
     log.info(f"  Server python:    {' '.join(server_cmd_prefix)}")
     log.info(f"  Client python:    {' '.join(client_cmd_prefix)}")
@@ -293,7 +302,7 @@ def main(args: Args) -> None:
                     "--embodiment-tag", args.embodiment_tag,
                     "--use-sim-policy-wrapper",
                     "--port", str(port),
-                    "--seed", str(args.seed),
+                    "--seed", str(effective_seed),
                 ],
                 env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)},
                 stdout=f,
@@ -322,7 +331,7 @@ def main(args: Args) -> None:
         "MUJOCO_EGL_DEVICE_ID": "0",
     }
 
-    def launch_client(exp: Experiment, gpu_id: int) -> subprocess.Popen:
+    def launch_client(exp: Experiment, gpu_id: int) -> tuple[subprocess.Popen, str]:
         port = args.base_port + gpu_id
         tag = exp_tag(exp)
         env_name = f"{args.env_prefix}/{exp.task}"
@@ -349,7 +358,7 @@ def main(args: Args) -> None:
             "--n_action_steps", str(exp.n_action_steps),
             "--results_json_path", results_json,
             "--video_dir", video_dir,
-            "--seed", str(args.seed),
+            "--seed", str(effective_seed),
             *(["--extend_episode_budget"] if args.extend_episode_budget
               else ["--no-extend_episode_budget"]),
         ]
@@ -362,7 +371,7 @@ def main(args: Args) -> None:
                 stderr=subprocess.STDOUT,
             )
         all_procs.append(p)
-        return p
+        return p, client_log
 
     # --- Run experiments with work-queue scheduling ---
     # Each GPU picks up the next experiment as soon as it finishes the current one,
@@ -392,14 +401,15 @@ def main(args: Args) -> None:
         exp = pop_next_experiment()
         if exp is None:
             break
-        active_jobs[gpu_id] = (launch_client(exp, gpu_id), exp)
+        proc, client_log = launch_client(exp, gpu_id)
+        active_jobs[gpu_id] = (proc, exp, client_log)
 
     log.info(f"  Monitor: tail -f {log_dir}/client_*.log")
 
     # Poll for finished jobs and dispatch next experiment to freed GPU.
     while active_jobs:
         for gpu_id in list(active_jobs):
-            proc, exp = active_jobs[gpu_id]
+            proc, exp, client_log = active_jobs[gpu_id]
             ret = proc.poll()
             if ret is not None:
                 completed += 1
@@ -407,12 +417,14 @@ def main(args: Args) -> None:
                 log.info(
                     f"  [{completed}/{num_experiments - skipped_at_dispatch}] "
                     f"GPU {gpu_id} finished {exp_tag(exp)} — {status}"
+                    f"  log: {client_log}"
                 )
                 del active_jobs[gpu_id]
                 # Dispatch next experiment to this GPU.
                 next_exp = pop_next_experiment()
                 if next_exp is not None:
-                    active_jobs[gpu_id] = (launch_client(next_exp, gpu_id), next_exp)
+                    next_proc, next_log = launch_client(next_exp, gpu_id)
+                    active_jobs[gpu_id] = (next_proc, next_exp, next_log)
         if active_jobs:
             time.sleep(2)
 
