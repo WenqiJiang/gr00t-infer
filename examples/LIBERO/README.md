@@ -21,8 +21,13 @@ For more information, see the [official website](https://libero-project.github.i
 
 To reproduce our finetune results, use the following commands to setup dataset and launch finetune experiments. Please remember to set `WANDB_API_KEY` since `--use-wandb` is turned on by default. If you don't have a WANDB account, please remove this argument:
 
+First, install the Hugging Face CLI:
 ```bash
-huggingface-cli download \
+uv pip install huggingface-hub[cli]
+```
+
+```bash
+uv run uv run huggingface-cli download \
     --repo-type dataset IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot \
     --local-dir examples/LIBERO/libero_10_no_noops_1.0.0_lerobot/
 
@@ -30,15 +35,19 @@ huggingface-cli download \
 cp -r examples/LIBERO/modality.json examples/LIBERO/libero_10_no_noops_1.0.0_lerobot/meta/
 ```
 
-Run the finetune script:
+Run the finetune script (default 8 GPUs; set `NUM_GPUS=1` for single-GPU):
 ```bash
-uv run bash examples/LIBERO/finetune_libero_10.sh
+# 8 GPUs (default, may fail if NCCL is not configured correctly)
+bash examples/LIBERO/finetune_libero_10.sh
+
+# Single GPU
+CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 bash examples/LIBERO/finetune_libero_10.sh
 ```
 
 # Fine-tune LIBERO goal
 
 ```bash
-huggingface-cli download \
+uv run huggingface-cli download \
     --repo-type dataset IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot \
     --local-dir examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot/
 
@@ -50,13 +59,17 @@ cp examples/LIBERO/patches/episode_000082.mp4 examples/LIBERO/libero_goal_no_noo
 
 Run the finetune script:
 ```bash
-uv run bash examples/LIBERO/finetune_libero_goal.sh
+# 8 GPUs (default, may fail if NCCL is not configured correctly)
+bash examples/LIBERO/finetune_libero_goal.sh
+
+# Single GPU
+CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 bash examples/LIBERO/finetune_libero_goal.sh
 ```
 
 # Fine-tune LIBERO object
 
 ```bash
-huggingface-cli download \
+uv run huggingface-cli download \
     --repo-type dataset IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot \
     --local-dir examples/LIBERO/libero_object_no_noops_1.0.0_lerobot/
 
@@ -66,13 +79,17 @@ cp -r examples/LIBERO/modality.json examples/LIBERO/libero_object_no_noops_1.0.0
 
 Run the finetune script:
 ```bash
-uv run bash examples/LIBERO/finetune_libero_object.sh
+# 8 GPUs (default, may fail if NCCL is not configured correctly)
+bash examples/LIBERO/finetune_libero_object.sh
+
+# Single GPU
+CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 bash examples/LIBERO/finetune_libero_object.sh
 ```
 
 # Fine-tune LIBERO spatial
 
 ```bash
-huggingface-cli download \
+uv run huggingface-cli download \
     --repo-type dataset IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
     --local-dir examples/LIBERO/libero_spatial_no_noops_1.0.0_lerobot/
 
@@ -82,7 +99,11 @@ cp -r examples/LIBERO/modality.json examples/LIBERO/libero_spatial_no_noops_1.0.
 
 Run the finetune script:
 ```bash
-uv run bash examples/LIBERO/finetune_libero_spatial.sh
+# 8 GPUs (default, may fail if NCCL is not configured correctly)
+bash examples/LIBERO/finetune_libero_spatial.sh
+
+# Single GPU
+CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 bash examples/LIBERO/finetune_libero_spatial.sh
 ```
 
 # Evaluate checkpoint
@@ -95,27 +116,57 @@ sudo apt install libegl1-mesa-dev libglu1-mesa
 bash gr00t/eval/sim/LIBERO/setup_libero.sh
 ```
 
-Then, run client server evaluation under the project root directory in separate terminals:
+Then, run client server evaluation under the project root directory in separate terminals.
+
+## Evaluate LIBERO Spatial
 
 **Terminal 1 - Server:**
 ```bash
-uv run python gr00t/eval/run_gr00t_server.py \
-    --model-path /tmp/libero_spatial/checkpoint-20000/ \
-    --embodiment-tag LIBERO_PANDA \
-    --use-sim-policy-wrapper
+uv run python gr00t/eval/run_gr00t_server.py --model-path checkpoints/libero_spatial/checkpoint-20000/ --embodiment-tag LIBERO_PANDA --use-sim-policy-wrapper
 ```
 
 **Terminal 2 - Client:**
 ```bash
-gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python gr00t/eval/rollout_policy.py \
-    --n_episodes 10 \
-    --policy_client_host 127.0.0.1 \
-    --policy_client_port 5555 \
-    --max_episode_steps=720 \
-    --env_name libero_sim/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it \
-    --n_action_steps 8 \
-    --n_envs 5
+gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python gr00t/eval/rollout_policy.py --n_episodes 10 --policy_client_host 127.0.0.1 --policy_client_port 5555 --max_episode_steps=720 --env_name libero_sim/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate --n_action_steps 8 --n_envs 5
 ```
+
+## Evaluate LIBERO 10 (Long)
+
+**Terminal 1 - Server:**
+```bash
+uv run python gr00t/eval/run_gr00t_server.py --model-path checkpoints/libero_10/checkpoint-20000/ --embodiment-tag LIBERO_PANDA --use-sim-policy-wrapper
+```
+
+**Terminal 2 - Client:**
+```bash
+gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python gr00t/eval/rollout_policy.py --n_episodes 10 --policy_client_host 127.0.0.1 --policy_client_port 5555 --max_episode_steps=720 --env_name libero_sim/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it --n_action_steps 8 --n_envs 5
+```
+
+## Evaluate LIBERO Goal
+
+**Terminal 1 - Server:**
+```bash
+uv run python gr00t/eval/run_gr00t_server.py --model-path checkpoints/libero_goal/checkpoint-20000/ --embodiment-tag LIBERO_PANDA --use-sim-policy-wrapper
+```
+
+**Terminal 2 - Client:**
+```bash
+gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python gr00t/eval/rollout_policy.py --n_episodes 10 --policy_client_host 127.0.0.1 --policy_client_port 5555 --max_episode_steps=720 --env_name libero_sim/open_the_middle_drawer_of_the_cabinet --n_action_steps 8 --n_envs 5
+```
+
+## Evaluate LIBERO Object
+
+**Terminal 1 - Server:**
+```bash
+uv run python gr00t/eval/run_gr00t_server.py --model-path checkpoints/libero_object/checkpoint-20000/ --embodiment-tag LIBERO_PANDA --use-sim-policy-wrapper
+```
+
+**Terminal 2 - Client:**
+```bash
+gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python gr00t/eval/rollout_policy.py --n_episodes 10 --policy_client_host 127.0.0.1 --policy_client_port 5555 --max_episode_steps=720 --env_name libero_sim/pick_up_the_alphabet_soup_and_place_it_in_the_basket --n_action_steps 8 --n_envs 5
+```
+
+> **Note:** The above client commands show one example task per suite. See the full task list below to evaluate all tasks. You need to reload the server with the appropriate checkpoint for each suite, but can run multiple tasks against the same server.
 
 # Full task list
 
